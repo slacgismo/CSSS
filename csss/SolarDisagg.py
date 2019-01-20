@@ -2,9 +2,13 @@ import csss as CSSS
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression as LR
+##### Davide Modifications: 
+#    I enriched the calcPerformanceMetrics routine with new performance metrics
+#    I added the possibility to feed which IDS do not have solar and contrain their generation to 0
+#    I added a function Mape_mod
 
 class SolarDisagg_IndvHome(CSSS.CSSS):
-    def __init__(self, netloads, solarregressors, loadregressors, tuningregressors=None, names=None):
+    def __init__(self, netloads, solarregressors, loadregressors, tuningregressors=None, names=None, nosolar_ids = None):
         """
 
         :param netloads:        np.array of net loads at each home, with columns corresponding to entries of "names" if
@@ -41,6 +45,7 @@ class SolarDisagg_IndvHome(CSSS.CSSS):
         self.loadRegressors  = loadregressors
         self.tuningRegressors  = tuningregressors
         self.trueValues      = {}
+        self.nosolar_ids     = nosolar_ids
 
         ## Cycle through each net load, and create sources.
         for source_name in self.names:
@@ -49,6 +54,12 @@ class SolarDisagg_IndvHome(CSSS.CSSS):
             ## Add constraints that solar generation cannot exceed zero or net load.
             self.addConstraint( self.models[source_name]['source'] <= np.array(self.netloads[source_name]) )
             self.addConstraint( self.models[source_name]['source'] <= 0 )
+        
+##################
+        if self.nosolar_ids is not None:
+            for source_name in self.nosolar_ids:
+                self.addConstraint( self.models[source_name]['source'] == 0 )
+##################
 
         ## Add the aggregate load source
         self.addSource(regressor=loadregressors, name = 'AggregateLoad', alpha = 1)
@@ -90,13 +101,20 @@ class SolarDisagg_IndvHome(CSSS.CSSS):
         df['pmae']   = np.zeros(df.shape[0]) * np.nan
         df['mbe']    = np.zeros(df.shape[0]) * np.nan
         df['mean']   = np.zeros(df.shape[0]) * np.nan
-
+        df['MAPE']   = np.zeros(df.shape[0]) * np.nan
+        df['mae_max']= np.zeros(df.shape[0]) * np.nan
+        df['cv_max'] = np.zeros(df.shape[0]) * np.nan
+        df['max_sol_pred'] = np.zeros(df.shape[0]) * np.nan
+        
         df['cv_pos']     = np.zeros(df.shape[0]) * np.nan
         df['rmse_pos']   = np.zeros(df.shape[0]) * np.nan
         df['mae_pos']    = np.zeros(df.shape[0]) * np.nan
         df['pmae_pos']   = np.zeros(df.shape[0]) * np.nan
         df['mbe_pos']    = np.zeros(df.shape[0]) * np.nan
         df['mean_pos']   = np.zeros(df.shape[0]) * np.nan
+        df['MAPE_pos']   = np.zeros(df.shape[0]) * np.nan
+        df['mae_pos_max']= np.zeros(df.shape[0]) * np.nan
+        df['cv_pos_max'] = np.zeros(df.shape[0]) * np.nan
         df               = df.set_index('models')
 
         for name in self.trueValues.keys():
@@ -108,10 +126,15 @@ class SolarDisagg_IndvHome(CSSS.CSSS):
             df.loc[name,'mean'] = np.mean((truth))
             df.loc[name,'rmse'] = np.sqrt(np.mean((truth-est)**2))
             df.loc[name,'mae']  = np.mean(np.abs((truth-est)))
+            df.loc[name,'MAPE'] = MAPE_mod(est,truth,thrs=0.001)
+            df.loc[name,'max_sol_pred'] = np.max(np.abs(est))
+        
             if not (df.loc[name,'mean'] == 0):
                 df.loc[name,'cv']   = df.loc[name,'rmse'] / np.mean(truth)
                 df.loc[name,'pmae'] = df.loc[name,'mae']  / np.mean(truth)
-
+                df.loc[name,'mae_max']  =  df.loc[name,'mae']/ np.max(np.abs(truth))
+                df.loc[name,'cv_max'] = df.loc[name,'rmse'] / np.max(np.abs(truth))
+                
                 ## Find metrics for  positive indices only
                 posinds = np.abs(truth) > (0.05 * np.abs(np.mean(truth)))
                 truth = truth[posinds]
@@ -122,7 +145,11 @@ class SolarDisagg_IndvHome(CSSS.CSSS):
                 df.loc[name,'pmae_pos'] = df.loc[name,'mae_pos']  / np.mean(truth)
                 df.loc[name,'mbe_pos']  = np.mean((truth-est))
                 df.loc[name,'mean_pos'] = np.mean((truth))
-
+                df.loc[name,'MAPE_pos'] = MAPE_mod(est,truth)
+                df.loc[name,'mae_pos_max']  = df.loc[name,'mae_pos'] / np.max(np.abs(truth))
+                df.loc[name,'cv_pos_max']   = df.loc[name,'rmse_pos'] / np.max(np.abs(truth))
+                
+                
         self.performanceMetrics = df
 
         return(None)
@@ -433,7 +460,7 @@ class SolarDisagg_IndvHome_Realtime(CSSS.CSSS):
         self.trueValues[name] = trueValue
         return(None)
 
-    def calcPerformanceMetrics(self, dropzeros = False):
+    def calcPerformanceMetrics(self, dropzeros = False, MAPE = False):
         ## Function to calculate performance metrics
         # Dropping zeros is intended to remove nightime solar.
 
@@ -445,13 +472,14 @@ class SolarDisagg_IndvHome_Realtime(CSSS.CSSS):
         df['pmae']   = np.zeros(df.shape[0]) * np.nan
         df['mbe']    = np.zeros(df.shape[0]) * np.nan
         df['mean']   = np.zeros(df.shape[0]) * np.nan
-
+        
         df['cv_pos']     = np.zeros(df.shape[0]) * np.nan
         df['rmse_pos']   = np.zeros(df.shape[0]) * np.nan
         df['mae_pos']    = np.zeros(df.shape[0]) * np.nan
         df['pmae_pos']   = np.zeros(df.shape[0]) * np.nan
         df['mbe_pos']    = np.zeros(df.shape[0]) * np.nan
         df['mean_pos']   = np.zeros(df.shape[0]) * np.nan
+        
         df               = df.set_index('models')
 
         for name in self.trueValues.keys():
@@ -572,3 +600,19 @@ def convolve_cyc(x, filt, left = True):
     x = np.concatenate([x[-pad_l:], x, x[:pad_r]])
     x = np.convolve(x, filt, mode = 'valid')
     return(x)
+
+def MAPE_mod(predicted,actual,thrs = None):
+    # 0<thrs<1 : thrs consider there is no error if the absolute difference predicted Vs actual <= than thrs*abs(max(actual))
+    
+    if thrs:
+        posinds = np.abs(actual-predicted) >= thrs*np.max(np.abs(actual))
+        predicted_m = predicted[posinds] 
+        actual_m = actual[posinds]
+        error = np.sum(np.abs(actual_m-predicted_m)/np.abs(actual_m))/len(actual)
+    else:
+        error = np.mean(np.abs(actual-predicted)/np.abs(actual))
+    
+    return error
+
+
+
