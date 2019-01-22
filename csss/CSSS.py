@@ -148,7 +148,7 @@ class CSSS:
         ### This is a method to add a new source
         self.constraints.append(constraint)
 
-    def constructSolve(self):
+    def constructSolve(self, solver = None):
         ## This method constructs and solves the optimization
 
         ## Initialize objective function and modeled aggregate signal as 0
@@ -174,10 +174,13 @@ class CSSS:
 
         ## Append the constraint that the sum of sources must equal aggergate signal
         con.append(self.aggregateSignal == sum_sources)
-
+        
+        
+        
         ## Solve problem
         prob = cvp.Problem(cvp.Minimize(obj), con)
-        return prob.solve()
+        return prob.solve(solver=solver)
+
 
     def admmSolve(self,rho, MaxIter=500,ABSTOL= 1e-4,RELTOL=1e-1, verbose=False):
         ### This method constructs and solves the optimization using ADMM
