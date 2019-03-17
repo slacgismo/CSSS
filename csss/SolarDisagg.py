@@ -2,11 +2,14 @@ import csss as CSSS
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression as LR
+import copy
+from Custom_Functions.error_functions import rmse_pos
 ##### Davide Modifications: 
 #    I enriched the calcPerformanceMetrics routine with new performance metrics
 #    I added the possibility to feed which IDS do not have solar and contrain their generation to 0
 #    I added a function Mape_mod
-
+#    I added a class: Solar_Disagg_linear_model to perform solar disagg using a n inference aproach with a linear model
+#    I added a method to calculate the signal2noise ratio after the disaggregation has been performed
 class SolarDisagg_IndvHome(CSSS.CSSS):
     def __init__(self, netloads, solarregressors, loadregressors, tuningregressors=None, names=None, nosolar_ids = None):
         """
@@ -54,6 +57,8 @@ class SolarDisagg_IndvHome(CSSS.CSSS):
             ## Add constraints that solar generation cannot exceed zero or net load.
             self.addConstraint( self.models[source_name]['source'] <= np.array(self.netloads[source_name]) )
             self.addConstraint( self.models[source_name]['source'] <= 0 )
+            self.addConstraint( self.models[source_name]['theta'] >= 0 ) ####################
+            
         
 ##################
         if self.nosolar_ids is not None:
@@ -128,6 +133,10 @@ class SolarDisagg_IndvHome(CSSS.CSSS):
             df.loc[name,'mae']  = np.mean(np.abs((truth-est)))
             df.loc[name,'MAPE'] = MAPE_mod(est,truth,thrs=0.001)
             df.loc[name,'max_sol_pred'] = np.max(np.abs(est))
+            try:
+                df.loc[name,'rmse_pos'] = rmse_pos(est,truth)
+            except:
+                df.loc[name,'rmse_pos'] = np.nan
         
             if not (df.loc[name,'mean'] == 0):
                 df.loc[name,'cv']   = df.loc[name,'rmse'] / np.mean(truth)
@@ -139,7 +148,7 @@ class SolarDisagg_IndvHome(CSSS.CSSS):
                 posinds = np.abs(truth) > (0.05 * np.abs(np.mean(truth)))
                 truth = truth[posinds]
                 est   = est[posinds]
-                df.loc[name,'rmse_pos'] = np.sqrt(np.mean((truth-est)**2))
+#                df.loc[name,'rmse_pos'] = np.sqrt(np.mean((truth-est)**2))
                 df.loc[name,'mae_pos']  = np.mean(np.abs((truth-est)))
                 df.loc[name,'cv_pos']   = df.loc[name,'rmse_pos'] / np.mean(truth)
                 df.loc[name,'pmae_pos'] = df.loc[name,'mae_pos']  / np.mean(truth)
@@ -342,6 +351,27 @@ class SolarDisagg_IndvHome(CSSS.CSSS):
 
 
         return(None)
+        
+    def snr(self,df_true = None):
+        '''
+        calculate the SNR(signal to noise ratio)
+        param df_true is the data frame with true solar, use and netload
+        return: dataframe with index ids and column estimated and true snr
+        '''
+        SNR = pd.DataFrame(index = self.names+['AggregateLoad'], columns = ['snr_est','snr_true'])
+        for idd in self.names:
+            idd = int(idd)
+            if df_true is not None:
+                mask = df_true['gen'][idd] > 0.05*df_true['gen'][idd].mean()
+                SNR.loc[str(idd),'snr_true'] = np.square(np.linalg.norm(df_true.gen[idd][mask],2)/np.linalg.norm(df_true.use[idd][mask],2))       
+            solar_signal_est = -np.squeeze(np.array(self.models[str(idd)]['source'].value))
+            mask = solar_signal_est > 0.05*solar_signal_est.mean()
+            solar_signal_est = solar_signal_est[mask] 
+            use_signal_est   = df_true['netload'][idd].values[mask] + solar_signal_est
+            SNR.loc[str(idd),'snr_est'] = np.square(np.linalg.norm(solar_signal_est,2)/np.linalg.norm(use_signal_est,2))
+        self.SNR = SNR
+        SNR.fillna(0, inplace = True)
+        return
 
 class SolarDisagg_IndvHome_Realtime(CSSS.CSSS):
     def __init__(self, sdmod, aggregateNetLoad, solarregressors, loadregressors, tuningregressors = None):
@@ -539,7 +569,7 @@ def createTempInput(temp, size, minTemp=None, maxTemp=None, intercept=False):
     return minTemp, maxTemp, result
 
 
-def createSolarDisaggIndvInputs(data, home_ids, solar_proxy_ids):
+def createSolarDisaggIndvInputs(data, home_ids, solar_proxy_ids, time_index = None):
     """
     Helper function to create inputs to SolarDisagg_IndvHome from a time-series csv file. This function works with the
     data file generation script, tutorial_data_setup.py.
@@ -547,16 +577,20 @@ def createSolarDisaggIndvInputs(data, home_ids, solar_proxy_ids):
     :param data:                A path to the csv file (probably the one created by tutorial_data_setpu.py)
     :param solar_proxy_ids:     The site ID numbers associated with the solar proxy signals
     :param includes_agg_col:    If true, the csv contains an aggregate net load column
+    :param time_index:          List with start and end or index type
     :return:                    A dictionary mapping to the constructor for SolarDisagg_IndvHome
     """
     try:
         df = pd.read_csv(data, index_col=0, header=[0, 1], parse_dates=[0])
     except ValueError:
         if isinstance(data, pd.DataFrame):
-            df = data
+            df = copy.deepcopy(data)
         else:
             print('Please input a path to a csv file or a valid Pandas DataFrame')
             return
+
+    if time_index:
+        df = df[(df.index >= time_index[0]) & (df.index <= time_index[1])]
 
     if isinstance(solar_proxy_ids, str):
         solar_proxy_ids = np.load(solar_proxy_ids)
@@ -576,10 +610,14 @@ def createSolarDisaggIndvInputs(data, home_ids, solar_proxy_ids):
     data_out = {
         'netloads':         netloads,
         'solarregressors':  solarproxy,
-        'loadregressors':   np.hstack((hod, temp_regress)),
+        'loadregressors':   np.hstack((np.ones((len(hod),1)),hod, temp_regress)),
         'tuningregressors': hod,
         'names':            home_ids
     }
+    
+#   changes the names of the models to strings becuase the other functions do not like numbers as names
+#    if not isinstance(home_ids[0], str):
+    data_out['names'] = list(map(str,home_ids))
 
     return data_out
 
@@ -614,5 +652,137 @@ def MAPE_mod(predicted,actual,thrs = None):
     
     return error
 
+class Solar_Disagg_linear_model(object):
+    """
+    This class performs the solar disaggregation using the coefficients attributed to the solar model
+    Fit a linear model to predict the netload at the individual house and then use only the coefficient associated with the solarregressor.
+    """
+    
+    def __init__(self,netloads,loadregressors, solarregressors, names):
+        
+        self.netloads        = netloads
+        self.loadregressors  = loadregressors
+        self.solarregressors = solarregressors
+        self.names           = names
+        self.Nproxies        = solarregressors.shape[1]
+        
+    def fit(self):
+        """
+          X:regression matrix
+          y:true values
+        """
+        
+        X = copy.deepcopy(np.hstack((self.loadregressors,self.solarregressors)))
+        y = copy.deepcopy(self.netloads)
+        
+        LSE = copy.deepcopy(LR())
+        LSE.fit(X,y)
+        self.model = LSE
+        
+    def predict(self):
+        """
+          X:regression matrix
+        """
+        yp = np.matmul(self.solarregressors,(self.model.coef_[:,-self.Nproxies:]).T)
+        yp = pd.DataFrame(yp,columns = self.names)
+        yp[yp.columns[yp.mean()>0]] = 0 ## Set to zero the generation at those houses where it is attributed positive. Here the input proxy has negative generation. If the generation is predicted positive, the model is finding correlations with proxy data at non solar houses, therefore I set it to zero.
+        yp['AggregateLoad'] = copy.deepcopy(yp.sum(axis = 1))
+        self.yp = yp
+        return self.yp
+    
+    def calcPerformanceMetrics(self,df_true):
+        ## Function to calculate performance metrics
+        # Dropping zeros is intended to remove nightime solar.
+
+        df = pd.DataFrame()
+        df['models'] = self.names + ['AggregateLoad']
+        df['rmse']   = np.zeros(df.shape[0]) * np.nan
+        df['cv']     = np.zeros(df.shape[0]) * np.nan
+        df['mae']    = np.zeros(df.shape[0]) * np.nan
+        df['pmae']   = np.zeros(df.shape[0]) * np.nan
+        df['mbe']    = np.zeros(df.shape[0]) * np.nan
+        df['mean']   = np.zeros(df.shape[0]) * np.nan
+        df['MAPE']   = np.zeros(df.shape[0]) * np.nan
+        df['mae_max']= np.zeros(df.shape[0]) * np.nan
+        df['cv_max'] = np.zeros(df.shape[0]) * np.nan
+        df['max_sol_pred'] = np.zeros(df.shape[0]) * np.nan
+        
+        df['cv_pos']     = np.zeros(df.shape[0]) * np.nan
+        df['rmse_pos']   = np.zeros(df.shape[0]) * np.nan
+        df['mae_pos']    = np.zeros(df.shape[0]) * np.nan
+        df['pmae_pos']   = np.zeros(df.shape[0]) * np.nan
+        df['mbe_pos']    = np.zeros(df.shape[0]) * np.nan
+        df['mean_pos']   = np.zeros(df.shape[0]) * np.nan
+        df['MAPE_pos']   = np.zeros(df.shape[0]) * np.nan
+        df['mae_pos_max']= np.zeros(df.shape[0]) * np.nan
+        df['cv_pos_max'] = np.zeros(df.shape[0]) * np.nan
+        df               = df.set_index('models')
+
+        for name in self.names+['AggregateLoad']:
+            if name == 'AggregateLoad':
+                truth = df_true.loc[:,list(map(int,self.names))].sum(axis = 1).values
+                est   = self.yp[name].values
+            else:
+                truth   = df_true.loc[:,int(name)].values
+                est     = self.yp[name].values
+
+            ## Calculate metrics.
+            df.loc[name,'mbe']  = np.mean((truth-est))
+            df.loc[name,'mean'] = np.mean((truth))
+            df.loc[name,'rmse'] = np.sqrt(np.mean((truth-est)**2))
+            df.loc[name,'mae']  = np.mean(np.abs((truth-est)))
+            df.loc[name,'MAPE'] = MAPE_mod(est,truth,thrs=0.001)
+            df.loc[name,'max_sol_pred'] = np.max(np.abs(est))
+            try:
+                df.loc[name,'rmse_pos'] = rmse_pos(est,truth)
+            except:
+                df.loc[name,'rmse_pos'] = np.nan
+        
+            if not (df.loc[name,'mean'] == 0):
+                df.loc[name,'cv']   = df.loc[name,'rmse'] / np.mean(truth)
+                df.loc[name,'pmae'] = df.loc[name,'mae']  / np.mean(truth)
+                df.loc[name,'mae_max']  =  df.loc[name,'mae']/ np.max(np.abs(truth))
+                df.loc[name,'cv_max'] = df.loc[name,'rmse'] / np.max(np.abs(truth))
+                
+                ## Find metrics for  positive indices only
+                posinds = np.abs(truth) > (0.05 * np.abs(np.mean(truth)))
+                truth = truth[posinds]
+                est   = est[posinds]
+#                df.loc[name,'rmse_pos'] = np.sqrt(np.mean((truth-est)**2))
+                df.loc[name,'mae_pos']  = np.mean(np.abs((truth-est)))
+                df.loc[name,'cv_pos']   = df.loc[name,'rmse_pos'] / np.mean(truth)
+                df.loc[name,'pmae_pos'] = df.loc[name,'mae_pos']  / np.mean(truth)
+                df.loc[name,'mbe_pos']  = np.mean((truth-est))
+                df.loc[name,'mean_pos'] = np.mean((truth))
+                df.loc[name,'MAPE_pos'] = MAPE_mod(est,truth)
+                df.loc[name,'mae_pos_max']  = df.loc[name,'mae_pos'] / np.max(np.abs(truth))
+                df.loc[name,'cv_pos_max']   = df.loc[name,'rmse_pos'] / np.max(np.abs(truth))
+                
+                
+        self.performanceMetrics = df
+
+        return(None)
+        
+    def snr(self,df_true = None):
+        '''
+        calculate the SNR(signal to noise ratio)
+        param df_true is the data frame with true solar, use and netload
+        return: dataframe with index ids and column estimated and true snr
+        '''
+        SNR = pd.DataFrame(index = self.names+['AggregateLoad'], columns = ['snr_est','snr_true'])
+        for idd in self.names:
+            idd = int(idd)
+            if df_true is not None:
+                mask = df_true['gen'][idd] > 0.05*df_true['gen'][idd].mean()
+                SNR.loc[str(idd),'snr_true'] = np.square(np.linalg.norm(df_true.gen[idd][mask],2)/np.linalg.norm(df_true.use[idd][mask],2))       
+            solar_signal_est = -self.yp[str(idd)].values.squeeze()
+            mask = solar_signal_est > 0.05*solar_signal_est.mean()
+            solar_signal_est = solar_signal_est[mask] 
+            use_signal_est   = df_true['netload'][idd].values[mask] + solar_signal_est
+            SNR.loc[str(idd),'snr_est'] = np.square(np.linalg.norm(solar_signal_est,2)/np.linalg.norm(use_signal_est,2))
+            SNR.fillna(0, inplace = True)
+        self.SNR = SNR
+        return
+    
 
 

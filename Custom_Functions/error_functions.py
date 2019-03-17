@@ -30,8 +30,17 @@ def MAPE_pos(prediction,actual):
     return np.mean(np.abs((actual[eva] - prediction[eva]) / actual[eva]))
 
 def cv_pos(prediction,actual):
-    eva = np.abs(actual) > (0.05 * np.abs(np.mean(actual)))
+    eva = np.abs(actual) > (0.05 * np.mean(np.abs(actual)))
     return np.sqrt(np.mean((prediction[eva]-actual[eva])**2))/np.mean(actual[eva])
+
+def rmse_pos(prediction,actual):
+    eva = np.abs(actual) > (0.05 * np.mean(np.abs(actual)))
+    if sum(eva) == 0: # If the actual is always zero, then evaluate on the prediction
+        try:
+            eva = np.abs(prediction) > (0.05 * np.mean(np.abs(prediction)))
+        except:
+            eva = np.array([True]*len(prediction))
+    return np.sqrt(np.mean((prediction[eva]-actual[eva])**2))
  
 def mpe_pos(prediction,actual):
     eva = np.abs(actual) > (0.05 * np.abs(np.mean(actual)))
