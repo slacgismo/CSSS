@@ -1,7 +1,7 @@
 # Data downloaded from other sources
 data/*
 Solar_Disaggregation_Analysis/data/*
-figures/*
+Solar_Disaggregation_Analysis/figures/*
 
 # Keys to download data
 keys/*.txt
