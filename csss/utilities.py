@@ -273,7 +273,6 @@ def save_pkl(lst,fp):
     lst: list of the variables to pickle
     fp: file path
     '''
-    
     with open(fp, "wb") as f:
         pk.dump(lst,f)
     print('saved results in ',fp)

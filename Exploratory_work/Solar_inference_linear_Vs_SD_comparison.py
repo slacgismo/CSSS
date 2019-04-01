@@ -64,101 +64,107 @@ Ntunesys = 2
 Ndays = 30
 df_all_ = pd.DataFrame()
 df0 = pd.DataFrame()
-Nhomes_vec = np.array([8,45,80,120])
-errors = pd.Series(0,index = np.array([8,45,80,120]))
+Nhomes_vec = np.array([8])#,45,80,120])
+errors = pd.Series(0,index = Nhomes_vec)
 for Nhomes in Nhomes_vec:
     for j in range(N_each):
-        t1 = t_clock()
-     ## Choose homes and proxies
-        proxy_ids = list(np.random.choice(solar_ids['solar'],Nproxies, replace = False))
-        tune_ids = list(np.random.choice(list(set(solar_ids['solar'])-set(proxy_ids)),Ntunesys,replace = False))
-        if not tune_ids:
-            tune_ids = proxy_ids
-        Nsolar = int(Nhomes/2)
-        solarIDS =  list(np.random.choice(list(set(solar_ids['solar'])-set(tune_ids)-set(proxy_ids)),Nsolar,replace = False))
-        nosolarIDS =  list(np.random.choice(solar_ids['nosolar'],int(Nhomes-Nsolar),replace = False))
-        home_ids = solarIDS+nosolarIDS+tune_ids
-    #    home_ids = list(np.random.choice(ids,Nhomes,replace = False)) + tune_ids
-        
-         ## Choose the time index - when perform it 
-        # pd.to_datetime('01-09-2019')
-        n_days = Ndays # number of days to analyse
-        resolution_minutes = (df.index[1]-df.index[0]).seconds/60 # determine the resolution of the data
-        start_date = np.random.choice(np.arange(0,(len(df)-int(24*60/resolution_minutes*(n_days+1)))))
-        time_index = [df.index[start_date],df.index[start_date+int(24*60/resolution_minutes*n_days)]] # beginiing and end datetime of the window to analyse
-        index_time = df.index[(df.index >= time_index[0]) & (df.index <= time_index[1])] # index useful to plot later
-        
-         ## Creating the data for ingestion in Solar Disagg
-        data = createSolarDisaggIndvInputs(df, home_ids, solar_proxy_ids= proxy_ids, time_index = time_index)
-        # pprint.pprint(data, indent=1)
+        np.random.seed(j)
+        for hourly in [False,True]:
+            df = deepcopy(load_data_2)
+            t1 = t_clock()
+         ## Choose homes and proxies
+            proxy_ids = list(np.random.choice(solar_ids['solar'],Nproxies, replace = False))
+            tune_ids = list(np.random.choice(list(set(solar_ids['solar'])-set(proxy_ids)),Ntunesys,replace = False))
+            if not tune_ids:
+                tune_ids = proxy_ids
+            Nsolar = int(Nhomes/2)
+            solarIDS =  list(np.random.choice(list(set(solar_ids['solar'])-set(tune_ids)-set(proxy_ids)),Nsolar,replace = False))
+            nosolarIDS =  list(np.random.choice(solar_ids['nosolar'],int(Nhomes-Nsolar),replace = False))
+            home_ids = solarIDS+nosolarIDS+tune_ids
+        #    home_ids = list(np.random.choice(ids,Nhomes,replace = False)) + tune_ids
+            
+             ## Choose the time index - when perform it 
+            n_days = Ndays # number of days to analyse
+            resolution_minutes = (df.index[1]-df.index[0]).seconds/60 # determine the resolution of the data
+            start_date = np.random.choice(np.arange(0,(len(df)-int(24*60/resolution_minutes*(n_days+1)))))
+            time_index = [df.index[start_date],df.index[start_date+int(24*60/resolution_minutes*n_days)]] # beginiing and end datetime of the window to analyse
+            index_time = df.index[(df.index >= time_index[0]) & (df.index <= time_index[1])] # index useful to plot later
+            df = df.loc[index_time]
+            if hourly == True:    
+                df = df.resample('H').mean().dropna()
+            index_time = df.index
+             ## Creating the data for ingestion in Solar Disagg
+            data = createSolarDisaggIndvInputs(df, home_ids, solar_proxy_ids= proxy_ids)
+            # pprint.pprint(data, indent=1)
+                    
+            
+         ## Solar Disaggregation and Linear model comparison for the same houses ids
+            
+             ## Solar Disagg method
+            ## Initial model
+            try:
+                reload(csss.SolarDisagg)
+                sdmod0 = deepcopy(csss.SolarDisagg.SolarDisagg_IndvHome(**data))
+                sdmod0.constructSolve(solver = None) # if solver = None, it uses the default one    
+            ## Initialising the tuned model and adding tuning system generation
+                sdmod_tune = deepcopy(sdmod0)
+                for key in tune_ids:
+                   sdmod_tune.addTrueValue(-df['gen'][key].loc[index_time], str(key))
+            ## update the alpha weights and perform the disaggregation
+                sdmod_tune.fitTuneModels(list(map(str,tune_ids)))
+                sdmod_tune.tuneAlphas()
+                sdmod_tune.constructSolve(solver = None)
+            ## add true value and calculate the performances
+                def addTrue_CalcPerf(sdmod, tuning = 'sd_tuned'):
+                    for key in home_ids:
+                        sdmod.addTrueValue(-df['gen'][key].loc[index_time], str(key))
+                    sdmod.models['AggregateLoad']['source'] = np.sum([sdmod.models[str(idd)]['source'] for idd in data['names']], axis = 0)
                 
-        
-     ## Solar Disaggregation and Linear model comparison for the same houses ids
-        
-         ## Solar Disagg method
-        ## Initial model
-        try:
+            ## Swap_AggLoad_FeederGen(sdmod_tune)
+                    ## I use the model of the AggregateLoad to fill it with the estimated aggregated generation at the feeder level. So now the aggregate load is actually the feeder generation to calculate the performances..
+                    sdmod.addTrueValue(name = 'AggregateLoad', trueValue=-df.loc[index_time,'gen'][list(map(int,data['names']))].sum(axis = 1))
+                    sdmod.calcPerformanceMetrics()
+                    sdmod.snr(df_true = df.loc[index_time])
+                    df_sd = sdmod.performanceMetrics
+                    df_sd['isSolar'] = [int(i) in solar_ids['solar'] for i in df_sd.index if i != 'AggregateLoad'] + [False]
+                    df_sd['model']   = tuning
+                    df_sd['Nhouses']   = Nhomes
+                    df_sd['hourly_resolution']  = hourly
+                    df_sd = pd.concat([df_sd, sdmod.SNR], axis=1)
+                    return df_sd
+                
+                df_sd0 = addTrue_CalcPerf(sdmod0, tuning = 'sd_initial')
+                df_sd  = addTrue_CalcPerf(sdmod_tune, tuning = 'sd_tuned')
+            except:
+                print('Exception Triggered')    
+                errors.loc[Nhomes]+=1
+                df_sd0 = pd.DataFrame()
+                df_sd = pd.DataFrame()
+            
+            ## Linear model
             reload(csss.SolarDisagg)
-            sdmod0 = deepcopy(csss.SolarDisagg.SolarDisagg_IndvHome(**data))
-            sdmod0.constructSolve(solver = None) # if solver = None, it uses the default one    
-        ## Initialising the tuned model and adding tuning system generation
-            sdmod_tune = deepcopy(sdmod0)
-            for key in tune_ids:
-               sdmod_tune.addTrueValue(-df['gen'][key].loc[index_time], str(key))
-        ## update the alpha weights and perform the disaggregation
-            sdmod_tune.fitTuneModels(list(map(str,tune_ids)))
-            sdmod_tune.tuneAlphas()
-            sdmod_tune.constructSolve(solver = None)
-        ## add true value and calculate the performances
-            def addTrue_CalcPerf(sdmod, tuning = 'sd_tuned'):
-                for key in home_ids:
-                    sdmod.addTrueValue(-df['gen'][key].loc[index_time], str(key))
-                sdmod.models['AggregateLoad']['name'] = 'Feeder'
-                sdmod.models['AggregateLoad']['source'] = np.sum([sdmod.models[str(idd)]['source'] for idd in data['names']], axis = 0)
-            
-        ## Swap_AggLoad_FeederGen(sdmod_tune)
-                ## I use the model of the AggregateLoad to fill it with the estimated aggregated generation at the feeder level. So now the aggregate load is actually the feeder generation to calculate the performances..
-                sdmod.addTrueValue(name = 'AggregateLoad', trueValue=-df.loc[index_time,'gen'][list(map(int,data['names']))].sum(axis = 1))
-                sdmod.calcPerformanceMetrics()
-                sdmod.snr(df_true = df.loc[index_time])
-                df_sd = sdmod.performanceMetrics
-                df_sd['isSolar'] = [int(i) in solar_ids['solar'] for i in df_sd.index if i != 'AggregateLoad'] + [False]
-                df_sd['model']   = tuning
-                df_sd['Nhouses']   = Nhomes
-                df_sd = pd.concat([df_sd, sdmod.SNR], axis=1)
-                return df_sd
-            
-            df_sd0 = addTrue_CalcPerf(sdmod0, tuning = 'sd_initial')
-            df_sd  = addTrue_CalcPerf(sdmod_tune, tuning = 'sd_tuned')
-        except:
-            print('Exception Triggered')    
-            errors.loc[Nhomes]+=1
-            df_sd0 = pd.DataFrame()
-            df_sd = pd.DataFrame()
+            ## Initialise the solar disagg linear class
+            sdlinear = deepcopy(Solar_Disagg_linear_model(netloads = data['netloads'],solarregressors = data['solarregressors'], loadregressors = data['loadregressors'], names = data['names']))
+            sdlinear.fit()
+            solar_pred = (sdlinear.predict())
+            sdlinear.calcPerformanceMetrics(df_true = -df.loc[index_time,'gen'][list(map(int,data['names']))])
+            df_lm = sdlinear.performanceMetrics
+            sdlinear.snr(df_true = df.loc[index_time])
+            df_lm['isSolar'] = [int(i) in solar_ids['solar'] for i in df_lm.index if i != 'AggregateLoad'] + [False]
+            df_lm['model'] = 'linear'
+            df_lm['Nhouses']   = Nhomes
+            df_lm['hourly_resolution']  = hourly
+            df_lm = pd.concat([df_lm, sdlinear.SNR], axis=1)
+            df0 = pd.concat([df_sd0,df_sd,df_lm])
+            df_all_ = pd.concat([df_all_,df0])
+            fp = 'Exploratory_work/data/results_sd_VS_linear_data_resolution'
+            save_pkl([df_all_,errors],fp+'.pkl')
+            if j == 9:
+               df_all_.to_csv(fp+'.csv')
+            print(Nhomes,j)
+            t2 = t_clock()
+            print('1 iteration took {}'.format((t2-t1)/60))
         
-        ## Linear model
-        reload(csss.SolarDisagg)
-        ## Initialise the solar disagg linear class
-        sdlinear = deepcopy(Solar_Disagg_linear_model(netloads = data['netloads'],solarregressors = data['solarregressors'], loadregressors = data['loadregressors'], names = data['names']))
-        sdlinear.fit()
-        solar_pred = (sdlinear.predict())
-        sdlinear.calcPerformanceMetrics(df_true = -df.loc[index_time,'gen'][list(map(int,data['names']))])
-        df_lm = sdlinear.performanceMetrics
-        sdlinear.snr(df_true = df.loc[index_time])
-        df_lm['isSolar'] = [int(i) in solar_ids['solar'] for i in df_lm.index if i != 'AggregateLoad'] + [False]
-        df_lm['model'] = 'linear'
-        df_lm['Nhouses']   = Nhomes
-        df_lm = pd.concat([df_lm, sdlinear.SNR], axis=1)
-        df0 = pd.concat([df_sd0,df_sd,df_lm])
-        df_all_ = pd.concat([df_all_,df0])
-        fp = 'Inference Approach/results_sd_VS_linear_Nhouses_snr'
-        save_pkl(df_all_,fp+'.pkl')
-        if j == 9:
-           df_all_.to_csv(fp+'.csv')
-        print(Nhomes,j)
-        t2 = t_clock()
-        print('1 iteration took {}'.format((t2-t1)/60))
-    
 #for i in solar_pred.columns:
 #    plt.figure()
 #    plt.plot(solar_pred[i]
@@ -172,7 +178,7 @@ for i in range(n_homes):
     ax[i].plot(index_time,df['gen'][int(idd)].loc[index_time].values[:n_pts], label = 'true_'+idd)
     ax[i].legend()
 ## add Feeder Level generation plot
-ax[i+1].plot(index_time,-solar_pred.sum(axis = 1).values[0:n_pts], label = 'gen_'+'feeder')
+ax[i+1].plot(index_time,-solar_pred[data['names']].sum(axis = 1).values[0:n_pts], label = 'gen_'+'feeder')
 ax[i+1].plot(index_time,np.sum([df['gen'][int(idd)].loc[index_time].values[:n_pts] for idd in home_ids], axis = 0), label = 'true_'+'feeder')
 ax[i+1].legend()
 plt.tight_layout()
@@ -184,11 +190,11 @@ n_pts = len(index_time) # number of points to plot
 fig, ax = plt.subplots(nrows= n_homes+1, ncols=1, sharex=True, figsize=(16,1.5*n_homes)) # n_pts/96*1.5
 for i in range(n_homes):
     idd = str(home_ids[i])
-    ax[i].plot(index_time,-sdmod0.models[idd]['source'].value[0:n_pts], label = 'gen_'+idd)
+    ax[i].plot(index_time,-sdmod_tune.models[idd]['source'].value[0:n_pts], label = 'gen_'+idd)
     ax[i].plot(index_time,df['gen'][int(idd)].loc[index_time].values[:n_pts], label = 'true_'+idd)
     ax[i].legend()
 ## add Feeder Level generation plot
-ax[i+1].plot(index_time,np.sum([-sdmod0.models[str(idd)]['source'].value[0:n_pts] for idd in home_ids], axis = 0), label = 'gen_'+'feeder')
+ax[i+1].plot(index_time,np.sum([-sdmod_tune.models[str(idd)]['source'].value[0:n_pts] for idd in home_ids], axis = 0), label = 'gen_'+'feeder')
 ax[i+1].plot(index_time,np.sum([df['gen'][int(idd)].loc[index_time].values[:n_pts] for idd in home_ids], axis = 0), label = 'true_'+'feeder')
 ax[i+1].legend()
 plt.tight_layout()
@@ -224,8 +230,8 @@ for j in range(2):
         ax[j].set_ylim([0,y_max])
     ax[j].set_title(figure_title[j])
     ax[j].grid(True)
-#plt.show()
-plt.savefig('Validation/figures/'+'sd_linear')#Optimal_sensitivity_sd_std_tuning')
+plt.show()
+#plt.savefig('Validation/figures/'+'sd_linear')#Optimal_sensitivity_sd_std_tuning')
 
 box_vectors_ = pd.DataFrame(index = isSolar,columns = ['means','medians'])
 for count,i in enumerate(box_vectors_.index):
@@ -273,7 +279,8 @@ box_vectors_
 
 #%% houses sensitivity Tuned Vs Linear
 name,sens_var,xlabel = 'results_sd_VS_linear_Nhouses_snr', 'Nhouses', 'N houses'
-fp = 'Inference Approach/'+name+'.pkl'
+name,sens_var,xlabel = 'results_sd_VS_linear_data_resolution', 'hourly_resolution', 'N houses'
+fp = Explorato+name+'.pkl'
 df_all = load_pkl(fp)
 df_all = df_all[df_all.index != 'AggregateLoad']
 N_each = 50
@@ -307,7 +314,7 @@ for j in range(2):
         ax[k,j].set_title(figure_title[k]+' - '+models_title[j])
         ax[k,j].grid(True)
 plt.show()
-plt.savefig('Inference Approach/figures/'+name)#Optimal_sensitivity_sd_std_tuning')
+#plt.savefig('Inference Approach/figures/'+name)#Optimal_sensitivity_sd_std_tuning')
 #%% houses sensitivity Tuned Vs Linear - Feeder Level
 name,sens_var,xlabel = 'results_sd_VS_linear_Nhouses_snr', 'Nhouses', 'N houses'
 fp = 'Inference Approach/'+name+'.pkl'
@@ -369,3 +376,81 @@ plt.xlim([0,5])
     #plt.xlim([-0.05,0.05])
     plt.ylim([0.9,1.2])
     plt.show()
+    
+#%% Data Resolution Initial - Tuned - Linear
+name,sens_var,xlabel = 'results_sd_VS_linear_data_resolution', 'hourly_resolution', 'N houses'
+fp = 'Exploratory_work/data/'+name+'.pkl'
+df_all = load_pkl(fp)[0]
+df_all = df_all[df_all.index != 'AggregateLoad']
+N_each = 50
+#N_houses = np.sort(df_all[sens_var].unique())
+N_houses = [False,True]
+models = ['sd_initial', 'sd_tuned']#, 'linear']
+metrics = ['cv_pos','rmse']
+isSolar = [True,False]
+box_vectors = pd.DataFrame(index = pd.MultiIndex.from_tuples([(i,j) for j in isSolar for i in N_houses]), columns = models)
+for l,k in enumerate(isSolar):
+    for j in models:
+        for i in N_houses:
+            index = [(df_all['model'] == j) & (df_all['isSolar'] == k) & (df_all[sens_var] == i)] #& (df_all['istunesys'] == False)
+            box_vectors.loc[(i,k),j] = df_all.loc[index[0]][metrics[l]].values.squeeze()
+
+#%% Plot results
+#f, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
+y_max = 2
+models_title = ['Initial model','Tuned model']#,'Linear model']
+figure_title = ['Solar houses','Non solar houses']
+resolution_title = ['15m','hourly']
+y_label = ['CV','RMSE']
+bp = []
+plt.close('all')
+f, ax = plt.subplots(2, 2, sharex = True, sharey = 'row', figsize = (10,6))
+for j in range(2):
+    for k in range(2):
+        bp.append(ax[k,j].boxplot([np.abs(box_vectors.loc[(N_houses[j],isSolar[k]),i]) for i in models],labels=[a for a in models_title],showmeans=True))
+        ax[k,j].set_ylabel(y_label[k])
+        if k ==0:
+            ax[k,j].set_ylim([0,y_max])
+#        ax[k,j].set_xlabel(xlabel)
+#        ax[k,j].set_title(figure_title[k]+' - '+resolution_title[j])
+        ax[k,j].grid(True)
+#plt.show()
+plt.savefig('Exploratory_work/figures/'+'data_resolution_it')#Optimal_sensitivity_sd_std_tuning')
+#%% Data Resolution Initial - Tuned - Linear - Feeder Level
+name,sens_var,xlabel = 'results_sd_VS_linear_data_resolution', 'hourly_resolution', 'N houses'
+fp = 'Exploratory_work/data/'+name+'.pkl'
+df_all = load_pkl(fp)[0]
+df_all = df_all[df_all.index == 'AggregateLoad']
+N_each = 50
+#N_houses = np.sort(df_all[sens_var].unique())
+N_houses = [False,True]
+models = ['sd_initial', 'sd_tuned']#, 'linear']
+metrics = ['cv_pos','cv_pos_max']
+isSolar = [False,False]
+box_vectors = pd.DataFrame(index = pd.MultiIndex.from_tuples([(i,j) for j in metrics for i in N_houses]), columns = models)
+for l,k in enumerate(isSolar):
+    for j in models:
+        for i in N_houses:
+            index = [(df_all['model'] == j) & (df_all['isSolar'] == k) & (df_all[sens_var] == i)] #& (df_all['istunesys'] == False)
+            box_vectors.loc[(i,metrics[l]),j] = df_all.loc[index[0]][metrics[l]].values.squeeze()
+
+#%% Plot results
+#f, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
+y_max = 2
+models_title = ['Initial model','Tuned model']#,'Linear model']
+figure_title = ['Feeder level disaggregation - 15m','Feeder level disaggregation - hourly']
+y_label = ['CV','CV_max']
+bp = []
+plt.close('all')
+f, ax = plt.subplots(2, 2, sharex = True, sharey = 'row', figsize = (10,6))
+for j in range(2):
+    for k in range(2):
+        bp.append(ax[k,j].boxplot([np.abs(box_vectors.loc[(N_houses[j],metrics[k]),i]) for i in models],labels=[str(a) for a in models_title],showmeans=True))
+        ax[k,j].set_ylabel(y_label[k])
+#        if k ==0:
+#            ax[k,j].set_ylim([0,y_max])
+#        ax[k,j].set_xlabel(xlabel)
+#        ax[k,j].set_title(figure_title[j])#+' - '+models_title[j])
+        ax[k,j].grid(True)
+#plt.show()
+plt.savefig('Exploratory_work/figures/'+'_feeder'+'data_resolution')#Optimal_sensitivity_sd_std_tuning')

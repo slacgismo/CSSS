@@ -26,6 +26,7 @@ scratch_work/
 *.pickle
 *.pkl
 *.p
+*.png
 
 ### Database ###
 *.accdb

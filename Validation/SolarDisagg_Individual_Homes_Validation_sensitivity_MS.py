@@ -416,7 +416,10 @@ plt.close('all')
 f, ax = plt.subplots(2, 2, sharex = True, sharey = 'row', figsize = (10,6))
 for j in range(2):
     for k in range(2):
-        bp.append(ax[k,j].boxplot([np.abs(box_vectors.loc[(i,isSolar[k]),models[j]]) for i in N_houses],labels=[str(a) for a in N_houses],showmeans=True))
+        if j == 1 and k == 0:
+            bp.append(ax[k,j].boxplot([np.abs(box_vectors.loc[(i,isSolar[k]),models[j]]) for i in np.flip(N_houses)],labels=[str(a) for a in N_houses/96],showmeans=True))
+        else:
+            bp.append(ax[k,j].boxplot([np.abs(box_vectors.loc[(i,isSolar[k]),models[j]]) for i in N_houses],labels=[str(a) for a in N_houses/96],showmeans=True))
         ax[k,j].set_ylabel(y_label[k])
         if k ==0:
             ax[k,j].set_ylim([0,y_max])
@@ -424,7 +427,7 @@ for j in range(2):
         ax[k,j].set_title(figure_title[k]+' - '+models_title[j])
         ax[k,j].grid(True)
 #plt.show()
-plt.savefig('Validation/figures/'+name)#Optimal_sensitivity_sd_std_tuning')
+plt.savefig('Validation/figures/'+name+'new')#Optimal_sensitivity_sd_std_tuning')
 
 #%% N proxies
 ii = 0
