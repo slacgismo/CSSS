@@ -1,6 +1,7 @@
 # Data downloaded from other sources
 data/*
 Solar_Disaggregation_Analysis/data/*
+Solar_Disaggregation_Analysis/figures/*
 
 # Keys to download data
 keys/*.txt
@@ -26,6 +27,7 @@ scratch_work/
 *.pickle
 *.pkl
 *.p
+*.png
 
 ### Database ###
 *.accdb

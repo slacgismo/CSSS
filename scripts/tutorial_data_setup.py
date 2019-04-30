@@ -113,11 +113,10 @@ def main():
         engine
     )
     weather.rename(columns={'localhour': 'time'}, inplace=True)
-    # timestamps come in UTC, change to local Austin time
+    # timestamps come in local hour
     weather['time'] = weather['time'].map(lambda x: x.replace(tzinfo=None))
     weather['time'] = pd.to_datetime(weather['time'])
     weather.set_index('time', inplace=True)
-    weather.index -= pd.Timedelta(hours=5)
     weather = weather.asfreq('15Min').interpolate('linear')         # Upsample from 1hr to 15min to match load data
 
 
